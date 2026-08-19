@@ -12,6 +12,8 @@
     "sk-gemini"
   ],
   "cookie_file": null,
+  "cookie_refresh_enabled": true,
+  "cookie_refresh_interval_sec": 540,
   "proxy": null,
   "log_requests": true,
   "temporary_chats": false,

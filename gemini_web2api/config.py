@@ -14,6 +14,9 @@ DEFAULT_CONFIG = {
     "default_model": "gemini-3.6-flash",
     "log_requests": True,
     "cookie_file": None,
+    # Google rotates __Secure-1PSIDTS; refresh it or the session dies in ~an hour.
+    "cookie_refresh_enabled": True,
+    "cookie_refresh_interval_sec": 540,
     "proxy": None,
     "api_keys": [],
     "temporary_chats": False,
