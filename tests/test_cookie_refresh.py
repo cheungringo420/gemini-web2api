@@ -304,6 +304,19 @@ class RefresherStartupTests(unittest.TestCase):
         CONFIG["cookie_refresh_enabled"] = False
         self.assertFalse(cookie_refresh.start_cookie_refresher())
 
+    def test_backoff_is_capped_so_a_429_cannot_outlast_the_cookie(self):
+        """A skipped refresh is a session that quietly expires -- do not wait forever."""
+        CONFIG["cookie_refresh_interval_sec"] = 1800
+        interval = cookie_refresh.refresh_interval_sec()
+        backoff = min(interval * cookie_refresh.FAILURE_BACKOFF_MULTIPLIER,
+                      cookie_refresh.MAX_BACKOFF_SEC)
+        self.assertLessEqual(backoff, cookie_refresh.MAX_BACKOFF_SEC)
+        self.assertEqual(backoff, 3600)
+
+    def test_default_cadence_leaves_room_under_the_rate_limit(self):
+        CONFIG.pop("cookie_refresh_interval_sec", None)
+        self.assertEqual(cookie_refresh.refresh_interval_sec(), 1800)
+
     def test_interval_floor_keeps_the_loop_from_hammering(self):
         CONFIG["cookie_refresh_interval_sec"] = 1
         self.assertEqual(cookie_refresh.refresh_interval_sec(), 60)

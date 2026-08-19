@@ -190,7 +190,9 @@ persisting conversations to the account history.
 Google rotates `__Secure-1PSIDTS` and stops accepting the previous value, so a
 cookie file left alone goes stale within roughly an hour. When `cookie_file` is
 set, a background thread calls `accounts.google.com/RotateCookies` every
-`cookie_refresh_interval_sec` seconds and writes the new value back to the file.
+`cookie_refresh_interval_sec` seconds (default 1800) and writes the new value back
+to the file. Do not shorten this much: `RotateCookies` answers `429` when called
+too often, and a skipped refresh is a session that quietly expires.
 
 This matters more than it looks: an expired session does not fail loudly.
 Logged-out Gemini still answers text prompts, so only the account-only paths

@@ -179,8 +179,9 @@ Pro 路由需要 **Gemini Advanced** (付费订阅). 免费 Google 账号的 coo
 
 Google 会轮换 `__Secure-1PSIDTS` 并停止接受旧值，因此放着不管的 cookie 文件
 大约一小时后就会失效。设置了 `cookie_file` 时，后台线程会每
-`cookie_refresh_interval_sec` 秒调用一次 `accounts.google.com/RotateCookies`，
-并把新值写回文件。
+`cookie_refresh_interval_sec` 秒（默认 1800）调用一次
+`accounts.google.com/RotateCookies`，并把新值写回文件。不要把间隔调得太短：
+调用过密时该接口会返回 `429`，而被跳过的一次刷新就意味着会话会悄悄过期。
 
 这一点容易被忽略：会话过期不会明显报错。未登录的 Gemini 依然能回答纯文本提问，
 只有需要账号的路径（例如图片输入）才会开始返回 `BardErrorInfo [1100]`。
