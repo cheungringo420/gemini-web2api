@@ -38,10 +38,17 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 # long-lived and rewriting it would risk clobbering a good value with a stale one.
 ROTATING_COOKIE_NAMES = ("__Secure-1PSIDTS", "__Secure-3PSIDTS")
 
-DEFAULT_REFRESH_INTERVAL_SEC = 540
-# The endpoint answers a dead session with 401 and no new cookie; slow down
-# instead of hammering it every interval.
-FAILURE_BACKOFF_MULTIPLIER = 4
+# __Secure-1PSIDTS stays valid on the order of an hour, so refreshing every half
+# hour keeps a comfortable margin without pestering the endpoint. Rotating far
+# more often than that is not free: RotateCookies starts answering 429, and a
+# refresh that gets skipped is a session that quietly expires. (An earlier 540s
+# default was read off the `identity.hfcr` hint in the endpoint's own 401 body;
+# measured against the live endpoint, that cadence draws 429s.)
+DEFAULT_REFRESH_INTERVAL_SEC = 1800
+# Back off after a failure, but never past the point where the current cookie
+# could lapse before the next attempt.
+FAILURE_BACKOFF_MULTIPLIER = 2
+MAX_BACKOFF_SEC = 3600
 
 _write_lock = threading.Lock()
 _refresher_thread: threading.Thread | None = None
@@ -295,7 +302,7 @@ def _refresh_loop(stop_event: threading.Event) -> None:
         else:
             if detail not in ("no_cookie", "unchanged"):
                 log(f"Cookie refresh: skipped ({detail})")
-            delay = interval * FAILURE_BACKOFF_MULTIPLIER
+            delay = min(interval * FAILURE_BACKOFF_MULTIPLIER, MAX_BACKOFF_SEC)
         stop_event.wait(delay)
 
 
