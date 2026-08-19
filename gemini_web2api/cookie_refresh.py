@@ -13,6 +13,7 @@ not enough. The rotation endpoint has to be called explicitly.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -87,29 +88,65 @@ def merge_cookie_string(cookie_str: str, updates: dict) -> str:
     return "; ".join(merged)
 
 
-def _atomic_write(path: str, payload: str) -> None:
-    """Write via a temp file so a crash cannot leave a truncated session file."""
+_OWNER_ONLY = stat.S_IRUSR | stat.S_IWUSR
+# os.replace() cannot swap a bind-mounted file: the mount point itself is busy.
+# That is the normal Docker layout (-v ./gemini-auth.json:/app/gemini-auth.json),
+# so the rewrite has to fall back to the existing inode rather than give up.
+_REPLACE_FALLBACK_ERRNOS = (errno.EBUSY, errno.EXDEV, errno.EACCES, errno.EPERM)
+
+
+def _write_cookie_file(path: str, payload: str) -> None:
+    """Replace atomically where possible, else rewrite the file in place.
+
+    The temp file holds a full copy of the session, so it is removed on every
+    path -- including the failure paths -- rather than left in the directory.
+    """
     directory = os.path.dirname(os.path.abspath(path)) or "."
     tmp_path = os.path.join(directory, f".{os.path.basename(path)}.tmp")
-    with open(tmp_path, "w") as handle:
+    try:
+        with open(tmp_path, "w") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, _OWNER_ONLY)
+        os.replace(tmp_path, path)
+        return
+    except OSError as exc:
+        if exc.errno not in _REPLACE_FALLBACK_ERRNOS:
+            raise
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    with open(path, "r+") as handle:
+        handle.seek(0)
         handle.write(payload)
+        handle.truncate()
         handle.flush()
         os.fsync(handle.fileno())
-    os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
-    os.replace(tmp_path, path)
+    try:
+        os.chmod(path, _OWNER_ONLY)
+    except OSError:
+        pass
 
 
-def persist_rotated_cookies(updates: dict) -> bool:
-    """Merge ``updates`` into the configured cookie file. Returns True if written.
+def persist_rotated_cookies(updates: dict) -> str:
+    """Merge ``updates`` into the configured cookie file.
+
+    Returns a status: ``written``, ``unchanged``, ``no_file``, ``read_failed``
+    or ``write_failed``. A failed write is reported distinctly from an unchanged
+    one so a read-only cookie file cannot masquerade as "nothing to do".
 
     Re-reads the file inside the lock so a concurrent update from the browser
     extension is merged into rather than overwritten.
     """
     if not updates:
-        return False
+        return "unchanged"
     cookie_file = CONFIG.get("cookie_file")
     if not cookie_file or not os.path.exists(cookie_file):
-        return False
+        return "no_file"
 
     with _write_lock:
         try:
@@ -117,7 +154,7 @@ def persist_rotated_cookies(updates: dict) -> bool:
                 content = handle.read().strip()
         except OSError as exc:
             log(f"Cookie refresh: cannot read {cookie_file}: {exc}")
-            return False
+            return "read_failed"
 
         is_json = content.startswith("{")
         if is_json:
@@ -125,7 +162,7 @@ def persist_rotated_cookies(updates: dict) -> bool:
                 data = json.loads(content)
             except json.JSONDecodeError as exc:
                 log(f"Cookie refresh: cannot parse {cookie_file}: {exc}")
-                return False
+                return "read_failed"
             cookie_str = data.get("cookie", "")
         else:
             data = {}
@@ -133,7 +170,7 @@ def persist_rotated_cookies(updates: dict) -> bool:
 
         merged = merge_cookie_string(cookie_str, updates)
         if merged == cookie_str:
-            return False
+            return "unchanged"
 
         if is_json:
             data["cookie"] = merged
@@ -142,10 +179,13 @@ def persist_rotated_cookies(updates: dict) -> bool:
             payload = merged
 
         try:
-            _atomic_write(cookie_file, payload)
+            _write_cookie_file(cookie_file, payload)
         except OSError as exc:
-            log(f"Cookie refresh: cannot write {cookie_file}: {exc}")
-            return False
+            hint = ""
+            if exc.errno in (errno.EROFS, errno.EACCES, errno.EPERM):
+                hint = " (mounted read-only? the refresher needs write access)"
+            log(f"Cookie refresh: cannot write {cookie_file}: {exc}{hint}")
+            return "write_failed"
 
         # load_cookie() caches on mtime; refresh it so in-flight requests pick
         # the new value up without waiting for the next stat.
@@ -157,7 +197,7 @@ def persist_rotated_cookies(updates: dict) -> bool:
             })
         except OSError:
             _cookie_cache["mtime"] = 0
-        return True
+        return "written"
 
 
 def _set_cookie_values(response) -> list:
@@ -231,8 +271,9 @@ def rotate_cookies_once() -> tuple:
     updates = {name: pairs[name] for name in ROTATING_COOKIE_NAMES if name in pairs}
     if not updates:
         return False, "no_rotating_cookie"
-    if not persist_rotated_cookies(updates):
-        return False, "unchanged"
+    status = persist_rotated_cookies(updates)
+    if status != "written":
+        return False, status
     return True, ",".join(sorted(updates))
 
 

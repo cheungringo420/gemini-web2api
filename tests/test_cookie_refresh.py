@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import stat
@@ -94,8 +95,9 @@ class PersistRotatedCookiesTests(unittest.TestCase):
     def test_updates_json_file_and_keeps_sibling_fields(self):
         self.write(json.dumps({"cookie": COOKIE_BASE, "sapisid": "sapisid-value"}))
 
-        self.assertTrue(
-            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"})
+        self.assertEqual(
+            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"}),
+            "written",
         )
 
         with open(self.path) as handle:
@@ -106,8 +108,9 @@ class PersistRotatedCookiesTests(unittest.TestCase):
     def test_supports_the_plain_cookie_string_file_format(self):
         self.write(COOKIE_BASE)
 
-        self.assertTrue(
-            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"})
+        self.assertEqual(
+            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"}),
+            "written",
         )
 
         with open(self.path) as handle:
@@ -148,8 +151,9 @@ class PersistRotatedCookiesTests(unittest.TestCase):
         self.write(json.dumps({"cookie": COOKIE_BASE}))
         before = os.path.getmtime(self.path)
 
-        self.assertFalse(
-            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-OLD"})
+        self.assertEqual(
+            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-OLD"}),
+            "unchanged",
         )
         self.assertEqual(os.path.getmtime(self.path), before)
 
@@ -158,10 +162,56 @@ class PersistRotatedCookiesTests(unittest.TestCase):
         cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"})
         self.assertEqual(os.listdir(self.tempdir.name), ["gemini-auth.json"])
 
+    def test_bind_mounted_file_falls_back_to_an_in_place_rewrite(self):
+        """os.replace() raises EBUSY on a bind mount -- the Docker default layout."""
+        self.write(json.dumps({"cookie": COOKIE_BASE}))
+        inode_before = os.stat(self.path).st_ino
+
+        real_replace = os.replace
+
+        def busy_replace(src, dst):
+            if os.path.abspath(dst) == os.path.abspath(self.path):
+                raise OSError(errno.EBUSY, "Device or resource busy")
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", side_effect=busy_replace):
+            status = cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"})
+
+        self.assertEqual(status, "written")
+        with open(self.path) as handle:
+            self.assertIn("sidts-NEW", json.load(handle)["cookie"])
+        # Rewritten in place, so the inode the bind mount points at is preserved.
+        self.assertEqual(os.stat(self.path).st_ino, inode_before)
+        self.assertEqual(os.listdir(self.tempdir.name), ["gemini-auth.json"])
+
+    def test_read_only_file_reports_write_failed_and_leaves_no_copy(self):
+        """A read-only mount must not look like "nothing to do"."""
+        self.write(json.dumps({"cookie": COOKIE_BASE}))
+
+        def readonly_replace(src, dst):
+            raise OSError(errno.EBUSY, "Device or resource busy")
+
+        original_open = open
+
+        def guarded_open(path, mode="r", *args, **kwargs):
+            if os.path.abspath(str(path)) == os.path.abspath(self.path) and "r+" in mode:
+                raise OSError(errno.EROFS, "Read-only file system")
+            return original_open(path, mode, *args, **kwargs)
+
+        with mock.patch("os.replace", side_effect=readonly_replace), \
+                mock.patch("builtins.open", side_effect=guarded_open):
+            status = cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"})
+
+        self.assertEqual(status, "write_failed")
+        with open(self.path) as handle:
+            self.assertIn("sidts-OLD", json.load(handle)["cookie"])
+        self.assertEqual(os.listdir(self.tempdir.name), ["gemini-auth.json"])
+
     def test_missing_cookie_file_is_not_created(self):
         CONFIG["cookie_file"] = os.path.join(self.tempdir.name, "absent.json")
-        self.assertFalse(
-            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"})
+        self.assertEqual(
+            cookie_refresh.persist_rotated_cookies({"__Secure-1PSIDTS": "sidts-NEW"}),
+            "no_file",
         )
         self.assertFalse(os.path.exists(CONFIG["cookie_file"]))
 
