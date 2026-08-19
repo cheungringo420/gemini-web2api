@@ -174,6 +174,8 @@ Create `config.json` in the same directory:
   "xsrf_token": null,
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
+  "cookie_refresh_enabled": true,
+  "cookie_refresh_interval_sec": 540,
   "proxy": null,
   "log_requests": true,
   "temporary_chats": false
@@ -182,6 +184,21 @@ Create `config.json` in the same directory:
 
 Set `temporary_chats` to `true` to use Gemini Web temporary chats instead of
 persisting conversations to the account history.
+
+### Cookie refresh
+
+Google rotates `__Secure-1PSIDTS` and stops accepting the previous value, so a
+cookie file left alone goes stale within roughly an hour. When `cookie_file` is
+set, a background thread calls `accounts.google.com/RotateCookies` every
+`cookie_refresh_interval_sec` seconds and writes the new value back to the file.
+
+This matters more than it looks: an expired session does not fail loudly.
+Logged-out Gemini still answers text prompts, so only the account-only paths
+(image input, for one) start returning `BardErrorInfo [1100]`.
+
+Set `cookie_refresh_enabled` to `false` to opt out — for example when an
+external tool owns the cookie file. Refreshing never creates the file, and a
+`401` (signed out) leaves it byte-for-byte unchanged.
 
 When `api_keys` is `[]`, authentication is disabled. When one or more keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>` or `x-api-key: <key>`.
 
